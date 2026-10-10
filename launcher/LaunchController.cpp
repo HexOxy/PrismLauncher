@@ -92,22 +92,10 @@ void LaunchController::decideAccount()
         m_accountToUse = accounts->at(instanceAccountIndex);
     }
 
-    if (!accounts->anyAccountIsValid()) {
-        // Tell the user they need to log in at least one account in order to play.
-        auto reply = CustomMessageBox::selectable(m_parentWidget, tr("No Accounts"),
-                                                  tr("In order to play Minecraft, you must have at least one Microsoft "
-                                                     "account which owns Minecraft logged in. "
-                                                     "Would you like to open the account manager to add an account now?"),
-                                                  QMessageBox::Information, QMessageBox::Yes | QMessageBox::No)
-                         ->exec();
-
-        if (reply == QMessageBox::Yes) {
-            // Open the account manager.
-            APPLICATION->ShowGlobalSettings(m_parentWidget, "accounts");
-        } else if (reply == QMessageBox::No) {
-            // Do not open "profile select" dialog.
-            return;
-        }
+    // Crack build: Microsoft hesabi zorunlu degil, offline hesapla direkt girilsin.
+    // Hesap yoksa bile engelleme, offline isim sorulup devam edilecek.
+    if (!accounts->anyAccountIsValid() && m_wantedLaunchMode != LaunchMode::Offline) {
+        // Hesap yoksa sessizce offline devam et, Microsoft dogrulama penceresi gosterme.
     }
 
     if (!m_accountToUse && accounts->anyAccountIsValid()) {
@@ -129,29 +117,33 @@ void LaunchController::decideAccount()
 
 LaunchDecision LaunchController::decideLaunchMode()
 {
-    if (!m_accountToUse || m_wantedLaunchMode == LaunchMode::Demo) {
+    if (m_wantedLaunchMode == LaunchMode::Demo) {
         m_actualLaunchMode = LaunchMode::Demo;
         return LaunchDecision::Continue;
     }
 
-    const auto* accounts = APPLICATION->accounts();
-    MinecraftAccountPtr accountToCheck = nullptr;
-
-    if (m_accountToUse->accountType() != AccountType::Offline) {
-        accountToCheck = m_accountToUse->ownsMinecraft() ? m_accountToUse : nullptr;
-    } else if (const auto defaultAccount = accounts->defaultAccount(); defaultAccount && defaultAccount->ownsMinecraft()) {
-        accountToCheck = defaultAccount;
-    } else {
-        for (int i = 0; i < accounts->count(); i++) {
-            if (const auto account = accounts->at(i); account->ownsMinecraft()) {
-                accountToCheck = account;
-                break;
-            }
-        }
+    if (m_wantedLaunchMode == LaunchMode::Offline) {
+        m_actualLaunchMode = LaunchMode::Offline;
+        return LaunchDecision::Continue;
     }
 
+    // Crack: hesap secilmediyse demo'ya atma, offline tam surum baslat
+    if (!m_accountToUse) {
+        m_actualLaunchMode = LaunchMode::Offline;
+        return LaunchDecision::Continue;
+    }
+
+    // Crack/offline hesap direkt tam surum offline modda acilsin, demo olmasin, MSA aramasin
+    if (m_accountToUse->accountType() == AccountType::Offline) {
+        m_actualLaunchMode = LaunchMode::Offline;
+        return LaunchDecision::Continue;
+    }
+
+    MinecraftAccountPtr accountToCheck = m_accountToUse->ownsMinecraft() ? m_accountToUse : nullptr;
+
     if (!accountToCheck) {
-        m_actualLaunchMode = LaunchMode::Demo;
+        // Crack: oyuna sahip degilse bile demo'ya zorlama, offline tam surum ac
+        m_actualLaunchMode = LaunchMode::Offline;
         return LaunchDecision::Continue;
     }
 
@@ -242,7 +234,7 @@ QString LaunchController::askOfflineName(const QString& playerName, bool* ok)
             message = tr("Choose your demo mode player name");
             break;
         case LaunchMode::Offline:
-            if (m_wantedLaunchMode == LaunchMode::Normal) {
+            if (m_wantedLaunchMode == LaunchMode::Normal && m_accountToUse) {
                 auto netErr = m_accountToUse->accountData()->networkError;
                 if (Net::isServerError(netErr)) {
                     title = tr("Auth servers offline");
@@ -301,6 +293,28 @@ void LaunchController::login()
         }
 
         emitFailed(tr("No account selected for launch"));
+        return;
+    }
+
+    // Crack: hic hesap yoksa Microsoft istemeden offline isim sorup baslat
+    if (!m_accountToUse) {
+        bool ok = false;
+        QString name = m_offlineName;
+        if (name.isEmpty()) {
+            name = askOfflineName("Player", &ok);
+            if (!ok) {
+                emitAborted();
+                return;
+            }
+        }
+        m_session = std::make_shared<AuthSession>();
+        m_session->launchMode = LaunchMode::Offline;
+        m_session->MakeOffline(name);
+        m_session->player_name = name;
+        m_session->uuid = MinecraftAccount::uuidFromUsername(name).toString(QUuid::Id128);
+        m_session->user_type = "offline";
+        m_actualLaunchMode = LaunchMode::Offline;
+        launchInstance();
         return;
     }
 
